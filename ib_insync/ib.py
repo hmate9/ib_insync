@@ -278,6 +278,7 @@ class IB:
             f'in {stats.numMsgRecv} messages, '
             f'session time {util.formatSI(stats.duration)}s.')
         self.client.disconnect()
+        self.disconnectedEvent.emit()
 
     def isConnected(self) -> bool:
         """Is there is an API connection to TWS or IB gateway?"""
@@ -699,7 +700,7 @@ class IB:
         clients or TWS/IB gateway.
         """
         self.client.reqGlobalCancel()
-        self._logger.info(f'reqGlobalCancel')
+        self._logger.info('reqGlobalCancel')
 
     def reqCurrentTime(self) -> datetime.datetime:
         """
@@ -1001,7 +1002,8 @@ class IB:
             endDateTime: Union[datetime.datetime, datetime.date, str, None],
             durationStr: str, barSizeSetting: str, whatToShow: str,
             useRTH: bool, formatDate: int = 1, keepUpToDate: bool = False,
-            chartOptions: List[TagValue] = []) -> BarDataList:
+            chartOptions: List[TagValue] = [],
+            timeout: float = 60) -> BarDataList:
         """
         Request historical bar data.
 
@@ -1039,11 +1041,14 @@ class IB:
                 to keep the bars updated; ``endDateTime`` must be set
                 empty ('') then.
             chartOptions: Unknown.
+            timeout: Timeout in seconds after which to cancel the request
+                and return an empty bar series. Set to ``0`` to wait
+                indefinitely.
         """
         return self._run(
             self.reqHistoricalDataAsync(
                 contract, endDateTime, durationStr, barSizeSetting, whatToShow,
-                useRTH, formatDate, keepUpToDate, chartOptions))
+                useRTH, formatDate, keepUpToDate, chartOptions, timeout))
 
     def cancelHistoricalData(self, bars: BarDataList):
         """
@@ -1096,7 +1101,7 @@ class IB:
 
     def reqMarketDataType(self, marketDataType: int):
         """
-        Set the market data type used throughout.
+        Set the market data type used for :meth:`.reqMktData`.
 
         Args:
             marketDataType: One of:
@@ -1198,6 +1203,7 @@ class IB:
         """
         ticker = self.ticker(contract)
         reqId = self.wrapper.endTicker(ticker, 'mktData')
+        self.wrapper.reqId2MarketDataType.pop(reqId, None)
         if reqId:
             self.client.cancelMktData(reqId)
         else:
@@ -1283,6 +1289,8 @@ class IB:
                 subscribe with.
         """
         ticker = self.ticker(contract)
+        ticker.domBids.clear()
+        ticker.domAsks.clear()
         reqId = self.wrapper.endTicker(ticker, 'mktDepth')
         if reqId:
             self.client.cancelMktDepth(reqId, isSmartDepth)
@@ -1696,8 +1704,10 @@ class IB:
             List[Ticker]:
         futures = []
         tickers = []
+        reqIds = []
         for contract in contracts:
             reqId = self.client.getReqId()
+            reqIds.append(reqId)
             future = self.wrapper.startReq(reqId, contract)
             futures.append(future)
             ticker = self.wrapper.startTicker(reqId, contract, 'snapshot')
@@ -1707,6 +1717,8 @@ class IB:
         await asyncio.gather(*futures)
         for ticker in tickers:
             self.wrapper.endTicker(ticker, 'snapshot')
+        for reqId in reqIds:
+            self.wrapper.reqId2MarketDataType.pop(reqId, None)
         return tickers
 
     def whatIfOrderAsync(self, contract: Contract, order: Order) -> \
@@ -1809,14 +1821,14 @@ class IB:
             self._logger.error('reqMarketRuleAsync: Timeout')
             return None
 
-    def reqHistoricalDataAsync(
+    async def reqHistoricalDataAsync(
             self, contract: Contract,
             endDateTime: Union[datetime.datetime, datetime.date, str, None],
             durationStr: str, barSizeSetting: str,
             whatToShow: str, useRTH: bool,
             formatDate: int = 1, keepUpToDate: bool = False,
-            chartOptions: List[TagValue] = []) -> \
-            Awaitable[BarDataList]:
+            chartOptions: List[TagValue] = [], timeout: float = 60) -> \
+            BarDataList:
         reqId = self.client.getReqId()
         bars = BarDataList()
         bars.reqId = reqId
@@ -1836,7 +1848,14 @@ class IB:
         self.client.reqHistoricalData(
             reqId, contract, end, durationStr, barSizeSetting,
             whatToShow, useRTH, formatDate, keepUpToDate, chartOptions)
-        return future
+        task = asyncio.wait_for(future, timeout) if timeout else future
+        try:
+            await task
+        except asyncio.TimeoutError:
+            self.client.cancelHistoricalData(reqId)
+            self._logger.warning(f'reqHistoricalData: Timeout for {contract}')
+            bars.clear()
+        return bars
 
     def reqHistoricalTicksAsync(
             self, contract: Contract,
