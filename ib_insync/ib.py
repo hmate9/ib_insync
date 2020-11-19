@@ -88,8 +88,15 @@ class IB:
           blocking request to finish before raising ``asyncio.TimeoutError``.
           The default value of 0 will wait indefinitely.
           Note: This timeout is not used for the ``*Async`` methods.
+        RaiseRequestErrors (bool):
+          Specifies the behaviour when certain API requests fail:
+
+          * :data:`False`: Silently return an empty result;
+          * :data:`True`: Raise a :class:`.RequestError`.
         MaxSyncedSubAccounts (int): Do not use sub-account updates
           if the number of sub-accounts exceeds this number (50 by default).
+        TimezoneTWS (pytz.timezone): Specifies what timezone TWS (or gateway)
+          is using. The default is to assume local system timezone.
 
     Events:
         * ``connectedEvent`` ():
@@ -187,7 +194,9 @@ class IB:
         'errorEvent', 'timeoutEvent')
 
     RequestTimeout: float = 0
+    RaiseRequestErrors: bool = False
     MaxSyncedSubAccounts: int = 50
+    TimezoneTWS = None
 
     def __init__(self):
         self._createEvents()
@@ -281,8 +290,8 @@ class IB:
         self.disconnectedEvent.emit()
 
     def isConnected(self) -> bool:
-        """Is there is an API connection to TWS or IB gateway?"""
-        return self.client.isConnected()
+        """Is there an API connection to TWS or IB gateway?"""
+        return self.client.isReady()
 
     def _onError(self, reqId, errorCode, errorString, contract):
         if errorCode == 1102:
@@ -393,14 +402,7 @@ class IB:
         Args:
             account: If specified, filter for this account name.
         """
-        if not self.wrapper.acctSummary:
-            # loaded on demand since it takes ca. 250 ms
-            self.reqAccountSummary()
-        if account:
-            return [v for v in self.wrapper.acctSummary.values()
-                    if v.account == account]
-        else:
-            return list(self.wrapper.acctSummary.values())
+        return self._run(self.accountSummaryAsync(account))
 
     def portfolio(self) -> List[PortfolioItem]:
         """List of portfolio items of the default account."""
@@ -1166,8 +1168,8 @@ class IB:
                 221    ``markPrice``
                 225    ``auctionVolume``, ``auctionPrice``,
                        ``auctionImbalance``
-                233    ``last``, ``lastSize``, ``rtVolume``, ``vwap``
-                       (Time & Sales)
+                233    ``last``, ``lastSize``, ``rtVolume``, ``rtTime``,
+                       ``vwap`` (Time & Sales)
                 236    ``shortableShares``
                 258    ``fundamentalRatios`` (of type
                        :class:`ib_insync.objects.FundamentalRatios`)
@@ -1619,7 +1621,7 @@ class IB:
             account: str = ''):
 
         if self.isConnected():
-            self._logger.warn('Already connected')
+            self._logger.warning('Already connected')
             return self
         self.wrapper.clientId = clientId
 
@@ -1632,38 +1634,33 @@ class IB:
             if clientId == 0:
                 self.reqAutoOpenOrders(True)
 
-            # request completed orders
-            if not readonly and self.client.serverVersion() >= 150:
-                try:
-                    await asyncio.wait_for(
-                        self.reqCompletedOrdersAsync(False), timeout or None)
-                except asyncio.TimeoutError:
-                    self._logger.error('reqCompletedOrders timed out')
-
-            # request updates for the main account
             accounts = self.client.getAccounts()
-            await asyncio.wait_for(
-                asyncio.gather(
-                    self.reqAccountUpdatesAsync(account or accounts[0]),
-                    self.reqPositionsAsync(),
-                    self.reqExecutionsAsync()),
-                timeout or None)
+            if not account and len(accounts) == 1:
+                account = accounts[0]
 
-            # request updates for sub-accounts, if there are not too many
+            # prepare initializing  requests
+            reqs = {}  # name -> request
+            reqs['positions'] = self.reqPositionsAsync()
+            if not readonly and self.client.serverVersion() >= 150:
+                reqs['completed orders'] = self.reqCompletedOrdersAsync(False)
+            if account:
+                reqs['account updates'] =self.reqAccountUpdatesAsync(account)
             if len(accounts) <= self.MaxSyncedSubAccounts:
-                await asyncio.wait_for(
-                    asyncio.gather(
-                        *(self.reqAccountUpdatesMultiAsync(a)
-                            for a in accounts)),
-                    timeout or None)
-            else:
-                self._logger.warning('Not requesting sub-account updates')
+                for acc in accounts:
+                    reqs[f'account updates for {acc}'] = \
+                        self.reqAccountUpdatesMultiAsync(acc)
 
-            # set minimum orderId
-            minReqId = 1 + max((
-                trade.order.orderId for trade in self.wrapper.trades.values()
-                if trade.order.clientId == clientId), default=-1)
-            self.client.updateReqId(minReqId)
+            # run initializing requests concurrently and log if any times out
+            tasks = [
+                asyncio.wait_for(req, timeout or None)
+                for req in reqs.values()]
+            resps = await asyncio.gather(*tasks, return_exceptions=True)
+            for name, resp in zip(reqs, resps):
+                if isinstance(resp, asyncio.TimeoutError):
+                    self._logger.error(f'{name} request timed out')
+
+            # the request for executions must come after all orders are in
+            await asyncio.wait_for(self.reqExecutionsAsync(), timeout or None)
 
             self._logger.info('Synchronization complete')
             self.connectedEvent.emit()
@@ -1746,6 +1743,17 @@ class IB:
         future = self.wrapper.startReq(reqId)
         self.client.reqAccountUpdatesMulti(reqId, account, modelCode, False)
         return future
+
+    async def accountSummaryAsync(self, account: str = '') -> \
+            List[AccountValue]:
+        if not self.wrapper.acctSummary:
+            # loaded on demand since it takes ca. 250 ms
+            await self.reqAccountSummaryAsync()
+        if account:
+            return [v for v in self.wrapper.acctSummary.values()
+                    if v.account == account]
+        else:
+            return list(self.wrapper.acctSummary.values())
 
     def reqAccountSummaryAsync(self) -> Awaitable[None]:
         reqId = self.client.getReqId()

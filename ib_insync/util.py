@@ -8,7 +8,7 @@ import sys
 import time
 from dataclasses import fields, is_dataclass
 from datetime import date, datetime, time as time_, timedelta, timezone
-from typing import AsyncIterator, Awaitable, Callable, Iterator, Union
+from typing import AsyncIterator, Awaitable, Callable, Iterator, List, Union
 
 import eventkit as ev
 
@@ -22,11 +22,12 @@ UNSET_INTEGER = 2 ** 31 - 1
 UNSET_DOUBLE = sys.float_info.max
 
 
-def df(objs, labels=None):
+def df(objs, labels: List[str] = None):
     """
     Create pandas DataFrame from the sequence of same-type objects.
-    When a list of labels is given then only retain those labels and
-    drop the rest.
+
+    Args:
+      labels: If supplied, retain only the given labels and drop the rest.
     """
     import pandas as pd
     from .objects import DynamicObject
@@ -40,9 +41,11 @@ def df(objs, labels=None):
             df = pd.DataFrame.from_records(o.__dict__ for o in objs)
         else:
             df = pd.DataFrame.from_records(objs)
-        if isinstance(obj, tuple) and hasattr(obj, '_fields'):
-            # assume it's a namedtuple
-            df.columns = obj.__class__._fields
+        if isinstance(obj, tuple):
+            _fields = getattr(obj, '_fields', None)
+            if _fields:
+                # assume it's a namedtuple
+                df.columns = _fields
     else:
         df = None
     if labels:
@@ -81,7 +84,9 @@ def dataclassNonDefaults(obj) -> dict:
     values = [getattr(obj, field.name) for field in fields(obj)]
     return {
         field.name: value for field, value in zip(fields(obj), values)
-        if value != field.default and value == value and value != []}
+        if value != field.default
+        and value == value
+        and not (isinstance(value, list) and value == [])}
 
 
 def dataclassUpdate(obj, *srcObjs, **kwargs) -> object:
@@ -288,13 +293,18 @@ def run(*awaitables: Awaitable, timeout: float = None):
         if loop.is_running():
             return
         loop.run_forever()
-        f = asyncio.gather(*asyncio.Task.all_tasks())
-        f.cancel()
         result = None
-        try:
-            loop.run_until_complete(f)
-        except asyncio.CancelledError:
-            pass
+        all_tasks = (
+            asyncio.all_tasks(loop)  # type: ignore
+            if sys.version_info >= (3, 7) else asyncio.Task.all_tasks())
+        if all_tasks:
+            # cancel pending tasks
+            f = asyncio.gather(*all_tasks)
+            f.cancel()
+            try:
+                loop.run_until_complete(f)
+            except asyncio.CancelledError:
+                pass
     else:
         if len(awaitables) == 1:
             future = awaitables[0]
@@ -484,6 +494,7 @@ def useQt(qtLib: str = 'PyQt5', period: float = 0.01):
         qloop.exec_()
         timer.stop()
         stack.append((qloop, timer))
+        qApp.processEvents()
 
     if qtLib not in ('PyQt5', 'PySide2'):
         raise RuntimeError(f'Unknown Qt library: {qtLib}')

@@ -1,7 +1,7 @@
 """Order types used by Interactive Brokers."""
 
 from dataclasses import dataclass, field
-from typing import ClassVar, List, NamedTuple
+from typing import ClassVar, List, NamedTuple, Set
 
 from eventkit import Event
 
@@ -163,7 +163,7 @@ class Order:
             attrs.pop('softDollarTier')
         clsName = self.__class__.__qualname__
         kwargs = ', '.join(
-            f'{k}={v!r}' for k, v in attrs.items() if v != [])
+            f'{k}={v!r}' for k, v in attrs.items())
         return f'{clsName}({kwargs})'
 
     __str__ = __repr__
@@ -222,18 +222,18 @@ class OrderStatus:
     whyHeld: str = ''
     mktCapPrice: float = 0.0
 
-    PendingSubmit: ClassVar = 'PendingSubmit'
-    PendingCancel: ClassVar = 'PendingCancel'
-    PreSubmitted: ClassVar = 'PreSubmitted'
-    Submitted: ClassVar = 'Submitted'
-    ApiPending: ClassVar = 'ApiPending'
-    ApiCancelled: ClassVar = 'ApiCancelled'
-    Cancelled: ClassVar = 'Cancelled'
-    Filled: ClassVar = 'Filled'
-    Inactive: ClassVar = 'Inactive'
+    PendingSubmit: ClassVar[str] = 'PendingSubmit'
+    PendingCancel: ClassVar[str] = 'PendingCancel'
+    PreSubmitted: ClassVar[str] = 'PreSubmitted'
+    Submitted: ClassVar[str] = 'Submitted'
+    ApiPending: ClassVar[str] = 'ApiPending'
+    ApiCancelled: ClassVar[str] = 'ApiCancelled'
+    Cancelled: ClassVar[str] = 'Cancelled'
+    Filled: ClassVar[str] = 'Filled'
+    Inactive: ClassVar[str] = 'Inactive'
 
-    DoneStates: ClassVar = {'Filled', 'Cancelled', 'ApiCancelled'}
-    ActiveStates: ClassVar = {
+    DoneStates: ClassVar[Set[str]] = {'Filled', 'Cancelled', 'ApiCancelled'}
+    ActiveStates: ClassVar[Set[str]] = {
         'PendingSubmit', 'ApiPending', 'PreSubmitted', 'Submitted'}
 
 
